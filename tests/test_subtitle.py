@@ -90,3 +90,40 @@ def test_default_has_no_rectangle_and_minimum_reading_time_prevents_flash(app):
     overlay.set_text("新的字幕")
     assert not overlay.clear_timer.isActive()
     overlay.close()
+
+
+def test_ocr_gap_preserves_exact_caption_pixels_and_font(app):
+    import numpy as np
+    from screenlens.appearance import Appearance, resolve_font
+    overlay = subtitle.SubtitleOverlay(Settings(subtitle_style_mode="text"))
+    overlay.resize(600, 120)
+    appearance = Appearance([(150, 65, 300, 28)], font_path=resolve_font(), font_px=28,
+                            target_box=(10, 5, 580, 100), fixed_font=True)
+    overlay.set_visual(np.zeros((120, 600, 3), np.uint8), appearance)
+    overlay.set_text("漏识别前后保持同样的字幕")
+    before = overlay.grab().toImage()
+    glyph = overlay._caption
+    overlay.set_visual(None, appearance)
+    after = overlay.grab().toImage()
+    assert overlay._caption is glyph
+    assert before == after and overlay.caption_metrics["font_px"] == 28
+    overlay.clear_after_reading()
+    assert overlay.clear_timer.isActive()
+    overlay.begin_update()
+    assert not overlay.clear_timer.isActive() and overlay.text
+    overlay.close()
+
+
+def test_repeated_updates_do_not_move_or_show_native_window_again(app, monkeypatch):
+    moves, shows = [], []
+    monkeypatch.setattr(subtitle, "place_native_window", lambda *args: moves.append(args))
+    overlay = subtitle.SubtitleOverlay(Settings())
+    overlay._native_ready = True
+    native_show = overlay.show
+    monkeypatch.setattr(overlay, "show", lambda: (shows.append(True), native_show()))
+    overlay.set_region(Region(100, 200, 600, 100))
+    overlay.set_text("第一句")
+    overlay.set_text("第二句更长的字幕")
+    overlay.set_text("第三句")
+    assert len(moves) == 1 and len(shows) == 1
+    overlay.close()

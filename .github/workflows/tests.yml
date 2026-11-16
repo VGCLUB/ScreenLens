@@ -28,4 +28,4 @@ jobs:
       - name: Test core behavior without credentials or external services
         run: >-
           python -m pytest -q tests/test_core.py tests/test_tracking.py
-          tests/test_translation.py tests/test_video.py
+          tests/test_translation.py tests/test_video.py tests/test_live.py

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import shutil
+import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,6 +17,10 @@ assert video_report["ok"] is True, "Verify the packaged video processing before 
 assert (bundle / "ScreenLens.exe").is_file()
 release = project / "release"
 release.mkdir(exist_ok=True)
+# Local QA output can contain user paths. Source archives use committed files only.
+subprocess.run(["git", "diff", "--exit-code", "HEAD", "--quiet"], cwd=project, check=True)
+untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=project)
+assert not untracked.strip(), "Commit reviewed source before packaging"
 for name in ("使用说明.txt", "README.md", "THIRD_PARTY_NOTICES.md"):
     shutil.copy2(project / name, bundle / name)
 shutil.copy2(project / "qa/VALIDATION.md", bundle / "验证记录.md")
@@ -29,18 +34,10 @@ with zipfile.ZipFile(portable, "w", compression=zipfile.ZIP_DEFLATED, compressle
 archives.append(portable)
 
 source = release / f"ScreenLens-{__version__}-source.zip"
-source_files = []
-for directory in ("screenlens", "tests", "assets", "licenses", "qa"):
-    source_files.extend(path for path in (project / directory).rglob("*")
-                        if path.is_file() and "__pycache__" not in path.parts
-                        and path.suffix != ".log" and path.name != "build.log"
-                        and "asr-base" not in path.parts and not (directory == "assets" and "ffmpeg" in path.parts))
-source_files.extend(project / name for name in ("run.py", "requirements.txt", "requirements-lock.txt",
-                    "ScreenLens.spec", "build.ps1", "package_release.py", "prepare_video_assets.py", ".gitignore",
-                    "README.md", "使用说明.txt", "THIRD_PARTY_NOTICES.md"))
-with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-    for path in sorted(source_files):
-        archive.write(path, Path("screen-translator") / path.relative_to(project))
+# Release only reviewed, committed source, including LICENSE and build files.
+# Local QA output may contain absolute user paths and must never be published.
+subprocess.run(["git", "archive", "--format=zip", f"--prefix=ScreenLens-{__version__}/",
+                "--output", str(source), "HEAD"], cwd=project, check=True)
 archives.append(source)
 
 test_suites = ET.parse(project / "qa/test-results.xml").getroot().findall("testsuite")

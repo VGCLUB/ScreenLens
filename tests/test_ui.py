@@ -31,6 +31,10 @@ def test_settings_dialog_preserves_and_clears_provider_key(app):
     dialog.provider.setCurrentText("自定义兼容 API")
     assert dialog.collect().api_key == ""
     assert dialog.model.text() == ""
+    assert dialog.collect().subtitle_lock_style and dialog.collect().subtitle_complete_only
+    assert dialog.collect().subtitle_focus_main and dialog.collect().subtitle_ignore_watermarks
+    dialog.ignore_text.setPlainText("游戏提示\n直播台标")
+    assert dialog.collect().subtitle_ignore_text == "游戏提示\n直播台标"
     dialog.close()
 
 
@@ -53,8 +57,9 @@ def test_ui_ignores_old_results_and_renders(app, monkeypatch):
     window.on_chunk(9, 20, "outdated epoch")
     window.on_chunk(10, 19, "outdated sequence")
     assert window.translated_text.toPlainText() == "今天天气真好。"
-    assert window.subtitle.text == "今天天气真好。"
+    assert window.subtitle.text == ""
     window.on_done(10, 20, 950, 260, False)
+    assert window.subtitle.text == "今天天气真好。"
     assert "0.26" in window.metrics.text()
     window.show()
     app.processEvents()
@@ -65,13 +70,13 @@ def test_ui_ignores_old_results_and_renders(app, monkeypatch):
     assert not window.source_card.isVisible()
     assert window.grab().save("qa/ui-compact-preview.png")
     window.on_source(10, 21, "Next subtitle", 60.0)
-    assert window.subtitle.text == ""
+    assert window.subtitle.text == "今天天气真好。"
     window.on_chunk(10, 20, "outdated caption")
-    assert window.subtitle.text == ""
+    assert window.subtitle.text == "今天天气真好。"
     window.on_chunk(10, 21, "下一句字幕")
-    assert window.subtitle.text == "下一句字幕"
+    assert window.subtitle.text == "今天天气真好。"
     window.on_source(10, 21, "", 60.0)
-    assert window.subtitle.text == "下一句字幕"
+    assert window.subtitle.text == "今天天气真好。"
     assert not window.subtitle.clear_timer.isActive()
     window.on_done(10, 21, 1800, 200, False)
     assert window.subtitle.text == "下一句字幕" and window.subtitle.clear_timer.isActive()

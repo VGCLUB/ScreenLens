@@ -13,7 +13,7 @@ def to_native_region(rect: QRect, logical_size, native_bounds) -> Region:
     sx, sy = width / logical_size.width(), height / logical_size.height()
     x1, y1 = round(rect.left() * sx), round(rect.top() * sy)
     x2, y2 = round((rect.left() + rect.width()) * sx), round((rect.top() + rect.height()) * sy)
-    return Region(left + x1, top + y1, x2 - x1, y2 - y1)
+    return Region(left + x1, top + y1, x2 - x1, y2 - y1, dpi_scale=sx)
 
 
 class SelectionOverlay(QWidget):

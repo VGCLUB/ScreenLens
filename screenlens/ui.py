@@ -19,7 +19,6 @@ from .pipeline import Pipeline
 from .selection import Selector
 from .subtitle import SubtitleOverlay
 from .translation import Translator
-from .tracking import same_text
 
 
 STYLE = """
@@ -126,7 +125,7 @@ class SettingsDialog(QDialog):
         form.addRow("", self.show_key)
         form.addRow("原文识别语言", self.ocr)
         form.addRow("检测间隔", self.interval)
-        form.addRow("画面稳定等待", self.stable)
+        form.addRow("字幕变化确认间隔", self.stable)
         form.addRow("译文字号", self.font)
         self.subtitle_cover = QCheckBox("把译文覆盖到原字幕位置")
         self.subtitle_cover.setChecked(settings.subtitle_cover)
@@ -171,6 +170,25 @@ class SettingsDialog(QDialog):
         form.addRow("字幕垂直偏移", self.subtitle_y)
         form.addRow("漏识别容忍时间", self.missing_delay)
         form.addRow("译文最短阅读时间", self.min_read)
+        self.lock_style = QCheckBox("锁定首句字幕的字号、字体与位置")
+        self.lock_style.setChecked(settings.subtitle_lock_style)
+        self.complete_only = QCheckBox("整句翻译完成后再更新覆盖字幕")
+        self.complete_only.setChecked(settings.subtitle_complete_only)
+        self.focus_main = QCheckBox("锁定主字幕，忽略角落文字与其他文字块")
+        self.focus_main.setChecked(settings.subtitle_focus_main)
+        self.ignore_watermarks = QCheckBox("过滤 Windows 激活水印")
+        self.ignore_watermarks.setChecked(settings.subtitle_ignore_watermarks)
+        self.ignore_text = QTextEdit()
+        self.ignore_text.setAcceptRichText(False)
+        self.ignore_text.setPlainText(settings.subtitle_ignore_text)
+        self.ignore_text.setPlaceholderText("每行填写一段需要忽略的固定文字，如游戏提示或台标")
+        self.ignore_text.setMaximumHeight(80)
+        self.ignore_text.setStyleSheet("background: #172335; border: 1px solid #33445d; padding: 6px;")
+        form.addRow("稳定显示", self.lock_style)
+        form.addRow("整句更新", self.complete_only)
+        form.addRow("字幕筛选", self.focus_main)
+        form.addRow("水印过滤", self.ignore_watermarks)
+        form.addRow("额外忽略文字", self.ignore_text)
         form_holder = QWidget()
         form_holder.setLayout(form)
         scroll = QScrollArea()
@@ -230,6 +248,11 @@ class SettingsDialog(QDialog):
         result.subtitle_style_mode = self.subtitle_style.currentData()
         result.subtitle_missing_ms = self.missing_delay.value()
         result.subtitle_min_read_ms = self.min_read.value()
+        result.subtitle_lock_style = self.lock_style.isChecked()
+        result.subtitle_complete_only = self.complete_only.isChecked()
+        result.subtitle_focus_main = self.focus_main.isChecked()
+        result.subtitle_ignore_watermarks = self.ignore_watermarks.isChecked()
+        result.subtitle_ignore_text = self.ignore_text.toPlainText().strip()
         return result
 
     def accept(self):
@@ -320,6 +343,7 @@ class MainWindow(QMainWindow):
         self._translation_pending = False
         self._pending_epoch = -1
         self._source_visible = False
+        self._visual_revision = None
         self.setWindowTitle("视译 ScreenLens")
         self.setWindowIcon(app_icon())
         self.setMinimumSize(430, 360)
@@ -415,6 +439,10 @@ class MainWindow(QMainWindow):
         events.done.connect(self.on_done)
         events.error.connect(self.on_error)
         events.frame.connect(self.on_frame)
+        self.visual_timer = QTimer(self)
+        self.visual_timer.setInterval(65)
+        self.visual_timer.timeout.connect(self.refresh_visual)
+        self.visual_timer.start()
         self.hotkeys = Hotkeys(self)
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         self.tray.setToolTip("视译 ScreenLens · Alt+Q 框选")
@@ -641,16 +669,13 @@ class MainWindow(QMainWindow):
         self.sequence = sequence
         self.status.setStyleSheet("")
         self.last_ocr_ms = elapsed
-        previous_source = self.source_text.toPlainText()
         self._source_visible = bool(text)
         self.source_text.setPlainText(text)
         if text:
             self._translation_pending = True
             self._pending_epoch = epoch
             self.translated_text.clear()
-            if not same_text(previous_source, text):
-                self.subtitle.set_text("")
-                self.subtitle.set_visual(None, None)
+            self.subtitle.begin_update()
         else:
             if self._pending_epoch != epoch:
                 self._translation_pending = False
@@ -662,20 +687,30 @@ class MainWindow(QMainWindow):
 
     def on_frame(self, epoch, sequence, payload):
         if epoch == self.epoch and sequence == self.sequence:
-            self.subtitle.set_visual(payload["frame"], payload["appearance"])
+            revision = (epoch, sequence, payload.get("revision", id(payload["frame"])))
+            if revision != self._visual_revision:
+                self.subtitle.set_visual(payload["frame"], payload["appearance"], payload.get("mask"))
+                self._visual_revision = revision
+
+    def refresh_visual(self):
+        visual = self.pipeline.latest_visual()
+        if visual is not None:
+            self.on_frame(*visual)
 
     def on_chunk(self, epoch, sequence, text):
         if epoch == self.epoch and sequence == self.sequence:
             scrollbar = self.translated_text.verticalScrollBar()
             pos = scrollbar.value()
             self.translated_text.setPlainText(text)
-            self.subtitle.set_text(text)
+            if not self.settings.subtitle_complete_only:
+                self.subtitle.set_text(text)
             scrollbar.setValue(pos)
             self.status.setText(self.subtitle.failure_reason if self.settings.subtitle_cover and self.subtitle.failure_reason else "●  译文接收中…")
 
     def on_done(self, epoch, sequence, total, first, cached):
         if epoch == self.epoch and sequence == self.sequence:
             self._translation_pending = False
+            self.subtitle.set_text(self.translated_text.toPlainText())
             self.subtitle.mark_complete()
             if not self._source_visible:
                 self.subtitle.clear_after_reading()
@@ -687,6 +722,8 @@ class MainWindow(QMainWindow):
                 self.metrics.setText(f"OCR {self.last_ocr_ms:.0f} ms  ·  译文来自本次运行缓存")
             else:
                 self.metrics.setText(f"OCR {self.last_ocr_ms:.0f} ms  ·  首字 {first / 1000:.2f} s  ·  翻译 {total / 1000:.2f} s")
+            if self.subtitle.caption_metrics.get("overflow"):
+                self.metrics.setText(self.metrics.text() + "  ·  字幕过长，完整译文见窗口；可扩大框选或调小字号")
 
     def on_error(self, epoch, sequence, text):
         if epoch == self.epoch and (sequence == 0 or sequence == self.sequence):
@@ -696,6 +733,7 @@ class MainWindow(QMainWindow):
             self.status.setStyleSheet("color: #ffae9f;")
 
     def closeEvent(self, event):
+        self.visual_timer.stop()
         self.selector.cleanup()
         self.pipeline.close()
         self.hotkeys.close()

@@ -52,8 +52,12 @@ def run_overlay_check(output_path: str) -> int:
                              "SCREENLENS / SYNTHETIC SUBTITLE TEST")
             painter.setPen(Qt.GlobalColor.white)
             painter.setFont(QFont("Segoe UI", 21, QFont.Weight.Bold))
-            painter.drawText(QRect(0, self.height() // 2, self.width(), self.height() // 2),
+            painter.drawText(QRect(0, 75, self.width(), 70),
                              Qt.AlignmentFlag.AlignCenter, "SUBTITLE SOURCE 123")
+            painter.setPen(QColor("#8093a0"))
+            painter.setFont(QFont("Segoe UI", 10))
+            painter.drawText(QRect(0, 185, self.width()-20, 25), Qt.AlignmentFlag.AlignRight, "Activate Windows")
+            painter.drawText(QRect(0, 210, self.width()-20, 25), Qt.AlignmentFlag.AlignRight, "Go to Settings to activate Windows")
 
     try:
         screen = app.primaryScreen()
@@ -65,18 +69,28 @@ def run_overlay_check(output_path: str) -> int:
         fixture.show()
         settle()
         bounds = native_bounds(fixture)
-        region = Region(bounds.left + 20, bounds.top + bounds.height // 2,
-                        bounds.width - 40, bounds.height // 2)
+        scale = fixture.devicePixelRatioF()
+        region = Region(bounds.left + round(20*scale), bounds.top + round(65*scale),
+                        bounds.width - round(40*scale), bounds.height - round(75*scale), scale)
         with mss.MSS() as capture:
             baseline = np.asarray(capture.grab(region.as_dict()))[:, :, :3].copy()
             assert float(baseline.std()) > 10, "Synthetic source window is not visible"
             from .ocr import OcrEngine
-            from .appearance import detect_appearance
+            from .live import CaptionSelector, LiveStyleLock
             engine = OcrEngine("中 / 英 / 日（自动）")
             source_result = engine.analyze(baseline)
+            selector = CaptionSelector(Settings())
+            selected = selector.select(source_result.lines, baseline.shape)
+            selected_text = "\n".join(line.text for line in selected)
+            assert "SUBTITLE SOURCE 123" in selected_text, source_result.text
+            assert "activate" not in selected_text.casefold(), selected_text
+            assert "Activate Windows" in source_result.text, source_result.text
+            report["watermark_ocr"] = source_result.text
+            report["primary_subtitle_after_filter"] = selected_text
+            appearance, mask = LiveStyleLock().apply(baseline, selected, Settings(), scale)
             overlay = SubtitleOverlay(Settings())
             overlay.set_region(region)
-            overlay.set_visual(baseline, detect_appearance(baseline, source_result.lines))
+            overlay.set_visual(baseline, appearance, mask)
             overlay.set_text("译文直接覆盖在原字幕的位置")
             settle()
             assert overlay.isVisible(), overlay.failure_reason
@@ -94,6 +108,19 @@ def run_overlay_check(output_path: str) -> int:
             style = get_style(int(overlay.winId()), -20)
             assert style & 0x20 and style & 0x08000000
             report["mouse_passthrough_and_no_activation_styles"] = "passed"
+            sizes = []
+            for caption in ("短句", "这是较长的完整译文，显示时仍然保持首句的字号和位置。", "译文直接覆盖在原字幕的位置"):
+                overlay.set_text(caption)
+                settle(70)
+                sizes.append(overlay.caption_metrics["font_px"])
+            assert len(set(sizes)) == 1, sizes
+            report["short_and_long_caption_font_pixels"] = sizes
+            cached_caption = overlay._caption
+            overlay.set_visual(None, appearance)
+            settle(70)
+            assert overlay._caption is cached_caption and overlay.isVisible()
+            report["ocr_gap_keeps_caption_layer"] = "passed: same rendered glyphs, font and position"
+            overlay.set_visual(baseline, appearance, mask)
             # Composite the program's own rendered components for a local preview.
             preview = fixture.grab()
             preview.setDevicePixelRatio(1)

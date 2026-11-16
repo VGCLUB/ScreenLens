@@ -1,4 +1,4 @@
-param([switch]$NativeOverlayCheck, [switch]$VideoCheck)
+﻿param([switch]$NativeOverlayCheck, [switch]$VideoCheck)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $taskPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'

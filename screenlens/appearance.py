@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import functools
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -51,6 +51,8 @@ class Appearance:
     font_family: str = "Microsoft YaHei"
     font_px: int = 32
     stroke: int = 2
+    target_box: tuple[int, int, int, int] | None = None
+    fixed_font: bool = False
 
     def to_dict(self):
         return asdict(self)
@@ -160,14 +162,14 @@ def detect_appearance(frame: np.ndarray, lines: list[TextLine], font_override="�
     return Appearance(boxes, color, (0, 0, 0), path, family, size, max(1, min(5, round(size*.055))))
 
 
-def prepare_repair(frame, appearance):
+def prepare_repair(frame, appearance, mask_template=None):
     box = clip_box(union_box(appearance.boxes), frame.shape, max(8, appearance.stroke+6))
     x, y, w, h = box
     crop = frame[y:y+h, x:x+w].copy()
     local = Appearance([(a-x, b-y, c, d) for a, b, c, d in appearance.boxes],
                        appearance.color, appearance.outline, appearance.font_path,
                        appearance.font_family, appearance.font_px, appearance.stroke)
-    mask = glyph_mask(crop, local)
+    mask = mask_template[y:y+h, x:x+w].copy() if mask_template is not None else glyph_mask(crop, local)
     repaired = cv2.inpaint(crop, mask, 3, cv2.INPAINT_TELEA) if mask.any() else crop
     return box, repaired, mask, local
 
@@ -177,16 +179,60 @@ def _font(path, size):
     return ImageFont.truetype(path if Path(path).is_file() else resolve_font(), max(8, size))
 
 
+def _wrap_fixed(text, draw, font, width):
+    lines = []
+    for paragraph in text.strip().splitlines() or [""]:
+        remaining = paragraph.strip()
+        while remaining:
+            end = len(remaining)
+            if draw.textlength(remaining, font=font) > width:
+                low, high = 1, len(remaining)
+                while low < high:
+                    mid = (low+high+1)//2
+                    if draw.textlength(remaining[:mid], font=font) <= width:
+                        low = mid
+                    else:
+                        high = mid-1
+                end = low
+                boundary = remaining.rfind(" ", 0, end+1)
+                if boundary > end*.5:
+                    end = boundary
+            lines.append(remaining[:end].rstrip())
+            remaining = remaining[end:].lstrip()
+        if not paragraph.strip():
+            lines.append("")
+    return lines
+
+
 def draw_translation(image: Image.Image, text: str, appearance: Appearance, box=None, font_override="自动匹配"):
     draw = ImageDraw.Draw(image)
-    x, y, width, height = box or union_box(appearance.boxes)
+    x, y, width, height = box or appearance.target_box or union_box(appearance.boxes)
     path = resolve_font(font_override) if font_override != "自动匹配" else appearance.font_path
     if any("\u3000" <= char <= "\u9fff" for char in text) and Path(path).name.lower() in ("arial.ttf", "arialbd.ttf", "ariali.ttf", "segoeui.ttf", "times.ttf"):
-        path = str(FONT_DIR / ("simsun.ttc" if "times" in Path(path).name.lower() else "msyh.ttc"))
+        filename = "simsun.ttc" if "times" in Path(path).name.lower() else "msyhbd.ttc" if "bd" in Path(path).stem.lower() else "msyh.ttc"
+        path = str(FONT_DIR / filename)
     if any("\uac00" <= char <= "\ud7af" for char in text) and (FONT_DIR / "malgun.ttf").exists():
         path = str(FONT_DIR / "malgun.ttf")
     lines = text.strip().splitlines() or [text]
     preferred = max(8, appearance.font_px)
+    if appearance.fixed_font:
+        font = _font(path, preferred)
+        line_height = max(1, round(preferred*1.25)+appearance.stroke*2)
+        lines = _wrap_fixed(text, draw, font, max(1, width-appearance.stroke*2))
+        max_lines = max(1, height//line_height)
+        overflow = len(lines) > max_lines
+        if overflow:
+            lines = lines[:max_lines]
+            while lines[-1] and draw.textlength(lines[-1]+"…", font=font) > width-appearance.stroke*2:
+                lines[-1] = lines[-1][:-1]
+            lines[-1] += "…"
+        last_baseline = y+height-max(2, round(preferred*.15))
+        for index, line in enumerate(lines):
+            baseline = last_baseline-(len(lines)-1-index)*line_height
+            tx = x+(width-draw.textlength(line, font=font))/2
+            draw.text((round(tx), round(baseline)), line, font=font, anchor="ls", fill=appearance.color+(255,),
+                      stroke_width=appearance.stroke, stroke_fill=appearance.outline+(255,))
+        return {"font_px": preferred, "lines": len(lines), "overflow": overflow, "target_box": (x,y,width,height)}
     for size in range(preferred, 7, -1):
         font = _font(path, size)
         spacing = max(1, round(size*.1))
@@ -198,6 +244,22 @@ def draw_translation(image: Image.Image, text: str, appearance: Appearance, box=
     ty = y + (height-(bounds[3]-bounds[1]))/2 - bounds[1]
     draw.multiline_text((round(tx), round(ty)), value, font=font, fill=appearance.color+(255,),
                         stroke_width=appearance.stroke, stroke_fill=appearance.outline+(255,), spacing=spacing, align="center")
+    return {"font_px": size, "lines": len(lines), "overflow": False, "target_box": (x,y,width,height)}
+
+
+def caption_patch(shape, appearance, text, font_override="自动匹配"):
+    box = clip_box(appearance.target_box or union_box(appearance.boxes), shape, max(4, appearance.stroke+2))
+    x,y,w,h = box
+    local = replace(appearance, boxes=[(a-x,b-y,c,d) for a,b,c,d in appearance.boxes],
+                    target_box=(appearance.target_box[0]-x, appearance.target_box[1]-y, *appearance.target_box[2:]) if appearance.target_box else None)
+    image = Image.new("RGBA", (w,h))
+    metrics = draw_translation(image,text,local,font_override=font_override)
+    return box, np.asarray(image).copy(), metrics
+
+
+def repair_patch(frame, appearance, mask_template=None):
+    box, repaired, mask, _ = prepare_repair(frame,appearance,mask_template)
+    return box, np.dstack((cv2.cvtColor(repaired,cv2.COLOR_BGR2RGB),mask))
 
 
 def replacement_patch(frame, appearance, text, font_override="自动匹配"):

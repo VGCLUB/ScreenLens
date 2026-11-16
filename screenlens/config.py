@@ -77,6 +77,11 @@ class Settings:
     subtitle_style_mode: str = "glyph"
     subtitle_missing_ms: int = 800
     subtitle_min_read_ms: int = 1200
+    subtitle_lock_style: bool = True
+    subtitle_complete_only: bool = True
+    subtitle_focus_main: bool = True
+    subtitle_ignore_watermarks: bool = True
+    subtitle_ignore_text: str = ""
 
     def validate(self, require_key: bool = True) -> None:
         parsed = urlsplit(self.base_url.strip())
@@ -93,13 +98,15 @@ class Settings:
         if self.target not in TARGETS or self.ocr_profile not in OCR_PROFILES:
             raise ValueError("请选择有效的语言。")
         if not 150 <= self.interval_ms <= 3000 or not 0 <= self.stable_ms <= 1000:
-            raise ValueError("检测间隔或稳定等待时间超出范围。")
+            raise ValueError("检测间隔或字幕确认间隔超出范围。")
         if not 12 <= self.subtitle_font_size <= 72 or not 0 <= self.subtitle_opacity <= 100:
             raise ValueError("字幕字号或遮罩不透明度超出范围。")
         if not -2000 <= self.subtitle_offset_x <= 2000 or not -2000 <= self.subtitle_offset_y <= 2000:
             raise ValueError("字幕位置偏移超出范围。")
         if self.subtitle_style_mode not in ("glyph", "text", "box") or not 200 <= self.subtitle_missing_ms <= 3000 or not 0 <= self.subtitle_min_read_ms <= 5000:
             raise ValueError("字幕显示方式或同步时间超出范围。")
+        if not isinstance(self.subtitle_ignore_text, str):
+            raise ValueError("忽略文字应为每行一条的文本。")
 
     def save(self, path: Path = CONFIG_PATH) -> None:
         data = asdict(self)
