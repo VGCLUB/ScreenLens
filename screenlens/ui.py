@@ -130,7 +130,7 @@ class SettingsDialog(QDialog):
         self.subtitle_cover = QCheckBox("把译文覆盖到原字幕位置")
         self.subtitle_cover.setChecked(settings.subtitle_cover)
         self.subtitle_style = QComboBox()
-        for title, key in (("局部文字修复（无底框）", "glyph"), ("透明文字（不擦除原文）", "text"), ("黑底遮罩（兼容）", "box")):
+        for title, key in (("半透明单行字幕（固定字号）", "box"), ("局部文字修复（旧模式）", "glyph"), ("透明文字（旧模式）", "text")):
             self.subtitle_style.addItem(title, key)
         self.subtitle_style.setCurrentIndex(max(0, self.subtitle_style.findData(settings.subtitle_style_mode)))
         self.subtitle_family = QComboBox()
@@ -153,7 +153,7 @@ class SettingsDialog(QDialog):
         self.subtitle_opacity.setRange(0, 100)
         self.subtitle_opacity.setSuffix(" %")
         self.subtitle_opacity.setValue(settings.subtitle_opacity)
-        self.subtitle_opacity.setToolTip("100% 黑底完全遮住原字幕；降低后会透出原画面。")
+        self.subtitle_opacity.setToolTip("只绘制一条字幕高度的底框；默认 55%，可透出后方原字幕和画面，不修补原图。")
         self.subtitle_x = QSpinBox()
         self.subtitle_y = QSpinBox()
         for control, value in ((self.subtitle_x, settings.subtitle_offset_x), (self.subtitle_y, settings.subtitle_offset_y)):
@@ -164,14 +164,17 @@ class SettingsDialog(QDialog):
         form.addRow("原位字幕", self.subtitle_cover)
         form.addRow("字幕显示方式", self.subtitle_style)
         form.addRow("字幕字体", self.subtitle_family)
-        form.addRow("字幕最大字号", self.subtitle_font)
-        form.addRow("遮罩不透明度", self.subtitle_opacity)
+        form.addRow("字幕固定字号", self.subtitle_font)
+        form.addRow("底框不透明度", self.subtitle_opacity)
         form.addRow("字幕水平偏移", self.subtitle_x)
         form.addRow("字幕垂直偏移", self.subtitle_y)
         form.addRow("漏识别容忍时间", self.missing_delay)
         form.addRow("译文最短阅读时间", self.min_read)
-        self.lock_style = QCheckBox("锁定首句字幕的字号、字体与位置")
+        self.lock_style = QCheckBox("旧模式：锁定首句字幕的字号、字体与位置")
         self.lock_style.setChecked(settings.subtitle_lock_style)
+        self.lock_style.setToolTip("半透明单行模式始终使用上方固定字号，不根据原字幕改变。")
+        self.lock_style.setEnabled(settings.subtitle_style_mode != "box")
+        self.subtitle_style.currentIndexChanged.connect(lambda _: self.lock_style.setEnabled(self.subtitle_style.currentData() != "box"))
         self.complete_only = QCheckBox("整句翻译完成后再更新覆盖字幕")
         self.complete_only.setChecked(settings.subtitle_complete_only)
         self.focus_main = QCheckBox("锁定主字幕，忽略角落文字与其他文字块")
@@ -198,7 +201,7 @@ class SettingsDialog(QDialog):
         scroll.setMaximumHeight(570)
         layout.addWidget(scroll, 1)
         self.resize(620, 850)
-        details = QLabel("速度优先：选择非思考模型，检测间隔 150–350 ms。\n中英日模型已内置；额外识别语种首次使用需下载模型。\nAPI Key 使用 Windows 当前账户加密保存；翻译按服务商规则计费。")
+        details = QLabel("单行模式：固定字号、长句分段切换，不擦除原字幕。\n每段按长度保留阅读时间；新字幕到来优先切换，完整译文保留在窗口。\n速度优先：选择非思考模型，检测间隔 150–350 ms。\n中英日模型已内置；额外识别语种首次使用需下载模型。\nAPI Key 使用 Windows 当前账户加密保存；翻译按服务商规则计费。")
         details.setObjectName("muted")
         details.setWordWrap(True)
         layout.addWidget(details)
@@ -373,7 +376,7 @@ class MainWindow(QMainWindow):
         header.addWidget(self.compact_button)
         header.addWidget(settings_button)
         layout.addLayout(header)
-        description = QLabel("原字幕样式匹配 · 同步显示 · 支持 MP4 自动译制")
+        description = QLabel("固定字号 · 单行分段 · 半透明底框 · MP4 自动译制")
         description.setObjectName("muted")
         layout.addWidget(description)
         self.description = description
@@ -404,7 +407,7 @@ class MainWindow(QMainWindow):
         language_row.addWidget(self.top_check)
         layout.addLayout(language_row)
         cover_row = QHBoxLayout()
-        self.cover_check = QCheckBox("覆盖原字幕")
+        self.cover_check = QCheckBox("显示翻译字幕")
         self.cover_check.setChecked(settings.subtitle_cover)
         self.cover_check.toggled.connect(self.cover_changed)
         cover_row.addWidget(self.cover_check)
@@ -724,6 +727,8 @@ class MainWindow(QMainWindow):
                 self.metrics.setText(f"OCR {self.last_ocr_ms:.0f} ms  ·  首字 {first / 1000:.2f} s  ·  翻译 {total / 1000:.2f} s")
             if self.subtitle.caption_metrics.get("overflow"):
                 self.metrics.setText(self.metrics.text() + "  ·  字幕过长，完整译文见窗口；可扩大框选或调小字号")
+            elif self.subtitle.caption_metrics.get("pages", 1) > 1:
+                self.metrics.setText(self.metrics.text() + f"  ·  单行分段 {self.subtitle.caption_metrics['pages']} 段")
 
     def on_error(self, epoch, sequence, text):
         if epoch == self.epoch and (sequence == 0 or sequence == self.sequence):

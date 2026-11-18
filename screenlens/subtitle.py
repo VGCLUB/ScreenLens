@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import copy
+import math
 import sys
 import time
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QTextLayout, QTextOption, QImage
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QTextLayout, QTextOption, QImage
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .config import Settings
 from .native import exclude_from_capture, monitor_rect, place_native_window
 from .pipeline import Region
 from .appearance import caption_patch, repair_patch
+from .line_layout import paginate_line, single_line_layout, subtitle_font, page_read_ms
 
 
 def logical_rect(region: Region, geometry: QRect, native_bounds) -> QRect:
@@ -87,6 +89,16 @@ class SubtitleOverlay(QWidget):
         self._logical_geometry = None
         self._native_geometry = None
         self.first_shown_at = 0.0
+        self.pages = []
+        self.page_index = 0
+        self._pages_key = None
+        self._page_layout = None
+        self._page_layout_key = None
+        self._page_started_at = 0.0
+        self._clear_requested = False
+        self.page_timer = QTimer(self)
+        self.page_timer.setSingleShot(True)
+        self.page_timer.timeout.connect(self.advance_page)
         self.clear_timer = QTimer(self)
         self.clear_timer.setSingleShot(True)
         self.clear_timer.timeout.connect(lambda: self.set_text(""))
@@ -94,7 +106,9 @@ class SubtitleOverlay(QWidget):
     def apply_settings(self, settings: Settings):
         self.settings = copy.copy(settings)
         self._layout_key = None
+        self._pages_key = None
         self._position()
+        self._prepare_caption()
         self._sync_visibility()
         self.update()
 
@@ -107,15 +121,23 @@ class SubtitleOverlay(QWidget):
 
     def set_text(self, text: str):
         self.clear_timer.stop()
+        self._clear_requested = False
         if text and text != self.text:
             self.first_shown_at = time.monotonic()
         self.text = text
+        self.page_timer.stop()
+        self.page_index = 0
+        self._page_started_at = time.monotonic()
+        self._pages_key = None
         self._layout_key = None
         self._prepare_caption()
         self._sync_visibility()
         self.update()
 
     def set_visual(self, frame, appearance, mask=None):
+        if self.settings.subtitle_style_mode == "box":
+            # The fixed box has no dependency on OCR style or captured pixels.
+            return
         self.source_frame = frame
         self.source_mask = mask
         if frame is not None:
@@ -135,8 +157,12 @@ class SubtitleOverlay(QWidget):
     def begin_update(self):
         """Keep the previous complete caption while the next request is pending."""
         self.clear_timer.stop()
+        self._clear_requested = False
 
     def _prepare_caption(self):
+        if self.settings.subtitle_style_mode == "box":
+            self._prepare_pages()
+            return
         if not self.text or self.appearance is None or self._source_shape is None:
             return
         appearance = self.appearance
@@ -149,14 +175,66 @@ class SubtitleOverlay(QWidget):
             self._caption = box, self._image(rgba)
             self._caption_key = key
 
+    def _box_font(self):
+        family = self.settings.subtitle_font
+        return subtitle_font(self.settings.subtitle_font_size,
+                             "Microsoft YaHei UI" if family == "自动匹配" else family)
+
+    def _band_height(self):
+        return math.ceil(max(QFontMetricsF(self._box_font()).height(), self.settings.subtitle_font_size*1.6))+12
+
+    def _prepare_pages(self):
+        width = max(1, self.width()-24)
+        font = self._box_font()
+        key = (self.text, width, font.toString())
+        if key != self._pages_key:
+            self.pages = paginate_line(self.text, width, font)
+            self.page_index = 0
+            self._page_started_at = time.monotonic()
+            self._pages_key = key
+        page_key = (self._pages_key, self.page_index)
+        if page_key != self._page_layout_key:
+            self._page_layout = single_line_layout(self.pages[self.page_index], width, font) if self.pages else None
+            self._page_layout_key = page_key
+        scale = self.region.dpi_scale if self.region else self.devicePixelRatioF()
+        self.caption_metrics = {"font_px": round(self.settings.subtitle_font_size*scale),
+                                "logical_font_px": self.settings.subtitle_font_size,
+                                "lines": 1 if self.pages else 0, "pages": len(self.pages),
+                                "page": self.page_index+1 if self.pages else 0, "overflow": False}
+
+    def _schedule_page(self):
+        if self.settings.subtitle_style_mode != "box" or not self.isVisible() or self.page_index+1 >= len(self.pages):
+            self.page_timer.stop()
+        elif not self.page_timer.isActive():
+            elapsed = (time.monotonic()-self._page_started_at)*1000
+            duration = page_read_ms(self.pages[self.page_index], self.settings.subtitle_min_read_ms)
+            self.page_timer.start(max(1, math.ceil(duration-elapsed)))
+
+    def advance_page(self):
+        self.page_timer.stop()
+        if self.page_index+1 >= len(self.pages):
+            return
+        self.page_index += 1
+        self._page_started_at = time.monotonic()
+        self._prepare_pages()
+        if self._clear_requested:
+            self.clear_after_reading()
+        self._schedule_page()
+        self.update()
+
     @staticmethod
     def _image(rgba):
         height, width = rgba.shape[:2]
         return QImage(rgba.data, width, height, rgba.strides[0], QImage.Format.Format_RGBA8888).copy()
 
     def clear_after_reading(self):
+        self._clear_requested = True
         elapsed = (time.monotonic()-self.first_shown_at)*1000
         remaining = max(0, self.settings.subtitle_min_read_ms-elapsed)
+        if self.settings.subtitle_style_mode == "box" and len(self.pages) > 1 and self.settings.subtitle_min_read_ms:
+            elapsed_page = (time.monotonic()-self._page_started_at)*1000
+            remaining = max(0, sum(page_read_ms(page, self.settings.subtitle_min_read_ms)
+                                   for page in self.pages[self.page_index:])-elapsed_page)
         if self.text and remaining > 0:
             self.source_frame = None
             self.clear_timer.start(round(remaining))
@@ -167,6 +245,9 @@ class SubtitleOverlay(QWidget):
     def mark_complete(self):
         if self.text:
             self.first_shown_at = time.monotonic()
+            self._page_started_at = self.first_shown_at
+            self.page_timer.stop()
+            self._schedule_page()
 
     def suspend(self, value: bool):
         self.suspended = value
@@ -175,9 +256,13 @@ class SubtitleOverlay(QWidget):
     def display_region(self):
         if self.region is None:
             return None
-        return Region(self.region.left + self.settings.subtitle_offset_x,
-                      self.region.top + self.settings.subtitle_offset_y,
-                      self.region.width, self.region.height, self.region.dpi_scale)
+        width, height = self.region.width, self.region.height
+        if self.settings.subtitle_style_mode == "box":
+            width = max(width, math.ceil((self.settings.subtitle_font_size*2+24)*self.region.dpi_scale))
+            height = max(height, math.ceil(self._band_height()*self.region.dpi_scale))
+        return Region(self.region.left + self.settings.subtitle_offset_x+(self.region.width-width)//2,
+                      self.region.top + self.settings.subtitle_offset_y+(self.region.height-height)//2,
+                      width, height, self.region.dpi_scale)
 
     def _position(self):
         region = self.display_region()
@@ -204,6 +289,7 @@ class SubtitleOverlay(QWidget):
     def _sync_visibility(self):
         wanted = self.settings.subtitle_cover and self.region is not None and bool(self.text.strip()) and not self.suspended
         if not wanted:
+            self.page_timer.stop()
             if self.isVisible():
                 self.hide()
             return
@@ -221,6 +307,20 @@ class SubtitleOverlay(QWidget):
         if not self.isVisible():
             self.show()
         self._position()
+        self._prepare_caption()
+        self._schedule_page()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.settings.subtitle_style_mode == "box":
+            self._prepare_pages()
+            self.page_timer.stop()
+            self._schedule_page()
+
+    def closeEvent(self, event):
+        self.page_timer.stop()
+        self.clear_timer.stop()
+        super().closeEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -229,6 +329,25 @@ class SubtitleOverlay(QWidget):
         painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         if not self.text.strip():
+            return
+        if self.settings.subtitle_style_mode == "box":
+            self._prepare_pages()
+            band_height = min(self.height(), self._band_height())
+            band = QRectF(0, (self.height()-band_height)/2, self.width(), band_height)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, round(self.settings.subtitle_opacity*2.55)))
+            painter.drawRoundedRect(band, 6, 6)
+            if self._page_layout is not None:
+                line = self._page_layout.lineAt(0)
+                metrics = QFontMetricsF(self._box_font())
+                baseline = band.center().y()+(metrics.ascent()-metrics.descent())/2
+                origin = QPointF((self.width()-line.naturalTextWidth())/2, baseline-line.ascent())
+                painter.setClipRect(band.adjusted(10, 2, -10, -2))
+                painter.setPen(QColor(0, 0, 0, 220))
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    self._page_layout.draw(painter, origin+QPointF(dx, dy))
+                painter.setPen(QColor("#ffffff"))
+                self._page_layout.draw(painter, origin)
             return
         if self.settings.subtitle_style_mode in ("glyph", "text") and self._caption is not None and self._source_shape is not None:
             sx, sy = self.width()/self._source_shape[1], self.height()/self._source_shape[0]
@@ -246,8 +365,6 @@ class SubtitleOverlay(QWidget):
                 draw_patch(self._repair)
             draw_patch(self._caption)
             return
-        if self.settings.subtitle_style_mode == "box":
-            painter.fillRect(self.rect(), QColor(0, 0, 0, round(self.settings.subtitle_opacity * 2.55)))
         margin_x = min(10, max(1, self.width() // 20))
         margin_y = min(5, max(1, self.height() // 12))
         area = self.rect().adjusted(margin_x, margin_y, -margin_x, -margin_y)

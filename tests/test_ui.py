@@ -33,6 +33,8 @@ def test_settings_dialog_preserves_and_clears_provider_key(app):
     assert dialog.model.text() == ""
     assert dialog.collect().subtitle_lock_style and dialog.collect().subtitle_complete_only
     assert dialog.collect().subtitle_focus_main and dialog.collect().subtitle_ignore_watermarks
+    assert dialog.collect().subtitle_style_mode == "box" and dialog.collect().subtitle_opacity == 55
+    assert not dialog.lock_style.isEnabled()
     dialog.ignore_text.setPlainText("游戏提示\n直播台标")
     assert dialog.collect().subtitle_ignore_text == "游戏提示\n直播台标"
     dialog.close()

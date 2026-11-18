@@ -60,8 +60,8 @@ def test_style_lock_keeps_font_and_baseline_across_ocr_box_jitter():
     ImageDraw.Draw(image).text((140, 85), "HELLO SCREENLENS", font=ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 32), fill="white")
     frame = np.asarray(image)[:, :, ::-1].copy()
     lock = LiveStyleLock()
-    first, mask = lock.apply(frame, [TextLine("HELLO SCREENLENS", (140, 90, 350, 32))], Settings(), 1.5)
-    second, _ = lock.apply(frame, [TextLine("New source", (230, 87, 220, 38))], Settings(), 1.5)
+    first, mask = lock.apply(frame, [TextLine("HELLO SCREENLENS", (140, 90, 350, 32))], Settings(subtitle_style_mode="glyph"), 1.5)
+    second, _ = lock.apply(frame, [TextLine("New source", (230, 87, 220, 38))], Settings(subtitle_style_mode="glyph"), 1.5)
     assert first.font_px == second.font_px
     assert first.font_path == second.font_path and first.stroke == second.stroke
     assert first.target_box == second.target_box and first.fixed_font and second.fixed_font

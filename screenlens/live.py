@@ -92,6 +92,8 @@ class LiveStyleLock:
         self.reference = None
 
     def apply(self,frame,lines,settings,scale=1.0):
+        if settings.subtitle_style_mode == "box":
+            return None, None
         current = detect_appearance(frame,lines,settings.subtitle_font)
         if not settings.subtitle_lock_style:
             return current, glyph_mask(frame,current)

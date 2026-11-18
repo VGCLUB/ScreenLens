@@ -52,7 +52,7 @@ def run_overlay_check(output_path: str) -> int:
                              "SCREENLENS / SYNTHETIC SUBTITLE TEST")
             painter.setPen(Qt.GlobalColor.white)
             painter.setFont(QFont("Segoe UI", 21, QFont.Weight.Bold))
-            painter.drawText(QRect(0, 75, self.width(), 70),
+            painter.drawText(QRect(0, 110, self.width(), 90),
                              Qt.AlignmentFlag.AlignCenter, "SUBTITLE SOURCE 123")
             painter.setPen(QColor("#8093a0"))
             painter.setFont(QFont("Segoe UI", 10))
@@ -88,6 +88,8 @@ def run_overlay_check(output_path: str) -> int:
             report["watermark_ocr"] = source_result.text
             report["primary_subtitle_after_filter"] = selected_text
             appearance, mask = LiveStyleLock().apply(baseline, selected, Settings(), scale)
+            assert appearance is None and mask is None, "Box mode must not estimate or erase original glyphs"
+            report["original_pixel_repair"] = "disabled: original subtitle stays behind the translucent box"
             overlay = SubtitleOverlay(Settings())
             overlay.set_region(region)
             overlay.set_visual(baseline, appearance, mask)
@@ -113,14 +115,34 @@ def run_overlay_check(output_path: str) -> int:
                 overlay.set_text(caption)
                 settle(70)
                 sizes.append(overlay.caption_metrics["font_px"])
+                assert overlay.caption_metrics["lines"] == 1
+                assert overlay._page_layout.lineCount() == 1
+                assert overlay._page_layout.font().pixelSize() == overlay.settings.subtitle_font_size
             assert len(set(sizes)) == 1, sizes
             report["short_and_long_caption_font_pixels"] = sizes
-            cached_caption = overlay._caption
+            cached_caption = overlay.grab().toImage()
             overlay.set_visual(None, appearance)
             settle(70)
-            assert overlay._caption is cached_caption and overlay.isVisible()
-            report["ocr_gap_keeps_caption_layer"] = "passed: same rendered glyphs, font and position"
+            assert overlay.grab().toImage() == cached_caption and overlay.isVisible()
+            report["ocr_gap_keeps_caption_layer"] = "passed: same rendered text, font and position"
             overlay.set_visual(baseline, appearance, mask)
+            caption_image = overlay.grab().toImage()
+            alpha = caption_image.pixelColor(round(5*scale), caption_image.height()//2).alpha()
+            assert 139 <= alpha <= 141, alpha
+            assert caption_image.pixelColor(round(5*scale), 0).alpha() == 0
+            report["background_opacity_percent"] = overlay.settings.subtitle_opacity
+            # Exercise the real Qt timer rather than manually changing the page.
+            from .line_layout import page_read_ms
+            overlay.set_text("这是较长的完整译文，字幕每次只显示一行，分段切换时也始终保持同样的字体大小。")
+            assert len(overlay.pages) > 1, overlay.pages
+            pages = list(overlay.pages)
+            overlay.mark_complete()
+            overlay.clear_after_reading()
+            settle(page_read_ms(pages[0], overlay.settings.subtitle_min_read_ms)+120)
+            assert overlay.page_index == 1 and overlay.isVisible()
+            assert overlay.caption_metrics["lines"] == 1 and overlay.caption_metrics["font_px"] == sizes[0]
+            report["automatic_single_line_pages"] = {"total":len(pages), "shown":overlay.page_index+1, "font_px":sizes[0]}
+            overlay.set_text("固定字号 · 单行字幕 · 半透明底框")
             # Composite the program's own rendered components for a local preview.
             preview = fixture.grab()
             preview.setDevicePixelRatio(1)

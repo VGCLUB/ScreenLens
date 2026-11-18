@@ -35,19 +35,20 @@ def test_unicode_layout_fits_without_covering_outside_region(app, text):
         assert line.naturalTextWidth() <= 320.1
 
 
-def test_mask_covers_original_and_opacity_is_adjustable(app):
+def test_single_line_band_opacity_is_adjustable_without_covering_whole_region(app):
     overlay = subtitle.SubtitleOverlay(Settings(subtitle_style_mode="box", subtitle_opacity=100))
     overlay.resize(600, 100)
     overlay.set_text("译文覆盖原字幕的位置")
     image = overlay.grab().toImage()
-    assert image.pixelColor(0, 0).alpha() == 255
-    assert image.pixelColor(0, 0).red() == 0
+    assert image.pixelColor(5, 50).alpha() == 255
+    assert image.pixelColor(5, 50).red() == 0
+    assert image.pixelColor(0, 0).alpha() == 0
     Path("qa").mkdir(exist_ok=True)
     assert image.save("qa/subtitle-render-preview.png")
     settings = Settings(subtitle_style_mode="box", subtitle_opacity=40)
     overlay.apply_settings(settings)
     image = overlay.grab().toImage()
-    assert 100 <= image.pixelColor(0, 0).alpha() <= 103
+    assert 100 <= image.pixelColor(5, 50).alpha() <= 103
     overlay.set_text("")
     assert not overlay.isVisible()
     overlay.close()
@@ -76,15 +77,16 @@ def test_old_settings_keep_key_and_get_overlay_defaults(tmp_path):
     path.write_text(json.dumps(content), encoding="utf-8")
     restored = Settings.load(path)
     assert restored.api_key == "test-key-only"
-    assert restored.subtitle_cover is True and restored.subtitle_opacity == 0
-    assert restored.subtitle_style_mode == "glyph"
+    assert restored.subtitle_cover is True and restored.subtitle_opacity == 55
+    assert restored.subtitle_style_mode == "box"
 
 
-def test_default_has_no_rectangle_and_minimum_reading_time_prevents_flash(app):
+def test_default_has_translucent_band_and_minimum_reading_time_prevents_flash(app):
     overlay = subtitle.SubtitleOverlay(Settings())
     overlay.resize(600,100)
     overlay.set_text("这句翻译会保留最短阅读时间")
     assert overlay.grab().toImage().pixelColor(0,0).alpha() == 0
+    assert 139 <= overlay.grab().toImage().pixelColor(5,50).alpha() <= 141
     overlay.clear_after_reading()
     assert overlay.text and overlay.clear_timer.isActive()
     overlay.set_text("新的字幕")

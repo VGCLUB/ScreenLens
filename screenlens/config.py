@@ -70,11 +70,12 @@ class Settings:
     always_on_top: bool = True
     subtitle_cover: bool = True
     subtitle_font_size: int = 26
-    subtitle_opacity: int = 0
+    subtitle_opacity: int = 55
     subtitle_offset_x: int = 0
     subtitle_offset_y: int = 0
     subtitle_font: str = "自动匹配"
-    subtitle_style_mode: str = "glyph"
+    subtitle_style_mode: str = "box"
+    subtitle_box_revision: int = 1
     subtitle_missing_ms: int = 800
     subtitle_min_read_ms: int = 1200
     subtitle_lock_style: bool = True
@@ -123,8 +124,10 @@ class Settings:
             return cls()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            if "subtitle_style_mode" not in data:
-                data["subtitle_opacity"] = 0
+            if data.get("subtitle_box_revision", 0) < 1:
+                data.update(subtitle_style_mode="box", subtitle_opacity=55,
+                            subtitle_lock_style=True, subtitle_complete_only=True,
+                            subtitle_box_revision=1)
             key = protect_secret(data.pop("encrypted_key", ""), decrypt=True)
             data.pop("api_key", None)
             result = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__}, api_key=key)
